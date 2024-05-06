@@ -21,7 +21,8 @@
         "duration_dir": "duration",
         "metadata_dir": "metadata",
         "read_metadata": true,
-        "clip_mode": "start"
+        "clip_mode": "start",
+        "hop_size": 200
     },
     "model": {
         "reference_encoder": {
