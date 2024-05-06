@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-import random
+import random, re
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from utils.data_utils import *
@@ -62,9 +62,10 @@ class GPTTTSDataset(torch.utils.data.Dataset):
 
     def get_phone_id(self, text):
         # convert text to phone id, you need to modify this function according to your g2p method
+        text = re.sub('[;:]', ',', text)
         txt_struct, txt = process(text, self.g2p)
         phone_seq = [p for w in txt_struct for p in w[1]]
-        phone_id = [PHPONE2ID[p] for p in phone_seq]
+        phone_id = [PHPONE2ID[p] for p in phone_seq if p in PHPONE2ID]
         return phone_id
 
     def __getitem__(self, index):
@@ -74,6 +75,9 @@ class GPTTTSDataset(torch.utils.data.Dataset):
 
         # load speech
         speech = librosa.load(utt_info["path"], sr=self.cfg.preprocess.sample_rate)[0]
+        if len(speech) % self.cfg.preprocess.hop_size != 0:
+            pad_num = self.cfg.preprocess.hop_size - len(speech) % self.cfg.preprocess.hop_size
+            speech = np.pad(speech, (0, pad_num))
         # get phone id
         text = utt_info["text"]
         phone_id = self.get_phone_id(text)

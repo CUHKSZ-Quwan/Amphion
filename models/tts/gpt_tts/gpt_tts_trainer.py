@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
+import os, json5
 import shutil
 import json
 import time
@@ -30,13 +30,13 @@ from torch.optim import Adam, AdamW
 from torch.nn import MSELoss, L1Loss
 import torch.nn.functional as F
 from transformers import get_inverse_sqrt_schedule
-
+from tqdm import tqdm
 import accelerate
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration
 
 
-class NS2Trainer(TTSTrainer):
+class GPTTTS2Trainer(TTSTrainer):
     def __init__(self, args, cfg):
         self.args = args
         self.cfg = cfg
@@ -123,6 +123,7 @@ class NS2Trainer(TTSTrainer):
                 self.logger.info(
                     f"Building dataset done in {(end - start) / 1e6:.2f}ms"
                 )
+            self.total_train_step = len(self.train_dataloader)
 
         # setup model
         with self.accelerator.main_process_first():
@@ -271,6 +272,15 @@ class NS2Trainer(TTSTrainer):
         latent_codec_dec = LatentCodecDecoderWithTimbre(
             cfg=self.cfg.model.latent_codec.decoder
         )
+        if self.cfg.model.wav_codec.encoder.pretrained_ckpt != '':
+            wav_codec_enc.load_state_dict(torch.load(self.cfg.model.wav_codec.encoder.pretrained_ckpt))
+            print("Loaded wav_codec_enc: {}".format(self.cfg.model.wav_codec.encoder.pretrained_ckpt))
+        if self.cfg.model.latent_codec.encoder.pretrained_ckpt != '':
+            latent_codec_enc.load_state_dict(torch.load(self.cfg.model.latent_codec.encoder.pretrained_ckpt))
+            print("Loaded latent_codec_enc: {}".format(self.cfg.model.latent_codec.encoder.pretrained_ckpt))
+        if self.cfg.model.latent_codec.decoder.pretrained_ckpt != '':
+            latent_codec_dec.load_state_dict(torch.load(self.cfg.model.latent_codec.decoder.pretrained_ckpt))
+            print("Loaded latent_codec_dec: {}".format(self.cfg.model.latent_codec.decoder.pretrained_ckpt))
 
         wav_codec_enc.eval()
         latent_codec_enc.eval()
@@ -391,7 +401,6 @@ class NS2Trainer(TTSTrainer):
 
     def _build_scheduler(self):
         lr_scheduler = get_inverse_sqrt_schedule(
-            self.cfg.train.lr_scheduler,
             optimizer=self.optimizer,
             num_warmup_steps=self.cfg.train.lr_warmup_steps,  # TODO: need to check wheather need to multiply by num_processes
         )
@@ -400,6 +409,16 @@ class NS2Trainer(TTSTrainer):
     def _build_criterion(self):
         criterion = torch.nn.CrossEntropyLoss(reduction="mean")
         return criterion
+
+    @staticmethod
+    def _count_parameters(model):
+        model_param = 0.0
+        if isinstance(model, dict):
+            for key, value in model.items():
+                model_param += sum(p.numel() for p in model[key].parameters())
+        else:
+            model_param = sum(p.numel() for p in model.parameters())
+        return model_param
 
     def write_summary(self, losses, stats):
         for key, value in losses.items():
@@ -428,13 +447,28 @@ class NS2Trainer(TTSTrainer):
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.scheduler.load_state_dict(checkpoint["scheduler"])
 
+    # TODO, save without module.
+    def save_checkpoint(self, state_dict, saved_model_path):
+        torch.save(state_dict, saved_model_path)
+
+    def load_checkpoint(self):
+        checkpoint_path = os.path.join(self.checkpoint_dir, "checkpoint")
+        assert os.path.exists(checkpoint_path)
+        checkpoint_filename = open(checkpoint_path).readlines()[-1].strip()
+        model_path = os.path.join(self.checkpoint_dir, checkpoint_filename)
+        assert os.path.exists(model_path)
+        if not self.cfg.train.ddp or self.args.local_rank == 0:
+            self.logger.info(f"Re(store) from {model_path}")
+        checkpoint = torch.load(model_path, map_location="cpu")
+        return checkpoint
+
     def _train_step(self, batch):
         train_losses = {}
         total_loss = 0
         train_stats = {}
 
         speech = batch["speech"]
-        mask = batch["mask"]
+        mask = batch["speech_mask"]
         phone_id = batch["phone_id"]
         phone_id_mask = batch["phone_id_mask"]
 
@@ -456,7 +490,7 @@ class NS2Trainer(TTSTrainer):
             del speech
             torch.cuda.empty_cache()
 
-        out = self.model["generator"](
+        out = self.model(
             phone_ids=phone_id.long(),
             phone_mask=phone_id_mask.long(),
             target_ids=target.long(),
@@ -489,7 +523,7 @@ class NS2Trainer(TTSTrainer):
         valid_stats = {}
 
         speech = batch["speech"]
-        mask = batch["mask"]
+        mask = batch["speech_mask"]
         phone_id = batch["phone_id"]
         phone_id_mask = batch["phone_id_mask"]
 
@@ -511,7 +545,7 @@ class NS2Trainer(TTSTrainer):
             del speech
             torch.cuda.empty_cache()
 
-        out = self.model["generator"](
+        out = self.model(
             phone_ids=phone_id.long(),
             phone_mask=phone_id_mask.long(),
             target_ids=target.long(),
@@ -538,7 +572,7 @@ class NS2Trainer(TTSTrainer):
         epoch_sum_loss = 0.0
         epoch_losses = dict()
 
-        for batch in self.valid_dataloader:
+        for batch in tqdm(self.valid_dataloader):
             # Put the data to cuda device
             device = self.accelerator.device
             for k, v in batch.items():
@@ -567,9 +601,9 @@ class NS2Trainer(TTSTrainer):
         epoch_sum_loss: float = 0.0
         epoch_losses: dict = {}
         epoch_step: int = 0
-
         for batch in self.train_dataloader:
             # Put the data to cuda device
+            start_time = time.time()
             device = self.accelerator.device
             for k, v in batch.items():
                 if isinstance(v, torch.Tensor):
@@ -579,6 +613,7 @@ class NS2Trainer(TTSTrainer):
             with self.accelerator.accumulate(self.model):
                 total_loss, train_losses, training_stats = self._train_step(batch)
             self.batch_count += 1
+            self.time_window.append(time.time() - start_time)
 
             # Update info for each step
             # TODO: step means BP counts or batch counts?
@@ -738,3 +773,33 @@ class NS2Trainer(TTSTrainer):
                 )
             )
         self.accelerator.end_training()
+
+    def _dump_cfg(self, path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        json5.dump(
+            self.cfg,
+            open(path, "w"),
+            indent=4,
+            sort_keys=True,
+            ensure_ascii=False,
+            quote_keys=True,
+        )
+
+    def echo_log(self, losses, mode="Training"):
+        message = [
+            "{} - Epoch {} Step {}/{}: [{:.3f} s/step]".format(
+                mode, self.epoch + 1, self.step, self.total_train_step, self.time_window.average
+            )
+        ]
+
+        for key in sorted(losses.keys()):
+            if isinstance(losses[key], dict):
+                for k, v in losses[key].items():
+                    message.append(
+                        str(k).split("/")[-1] + "=" + str(round(float(v), 5))
+                    )
+            else:
+                message.append(
+                    str(key).split("/")[-1] + "=" + str(round(float(losses[key]), 5))
+                )
+        self.logger.info(", ".join(message))
