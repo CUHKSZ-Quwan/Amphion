@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
-from models.tts.naturalspeech2.wavenet import WaveNet
 
 
 class Diffusion(nn.Module):

@@ -103,10 +103,10 @@ class CodecEncoder(nn.Module):
     ):
         super().__init__()
 
-        d_model = cfg.d_model if cfg is not None else d_model
-        up_ratios = cfg.up_ratios if cfg is not None else up_ratios
-        out_channels = cfg.out_channels if cfg is not None else out_channels
-        use_tanh = cfg.use_tanh if cfg is not None else use_tanh
+        d_model = cfg.d_model if cfg is not None and hasattr(cfg, "d_model") else d_model
+        up_ratios = cfg.up_ratios if cfg is not None and hasattr(cfg, "up_ratios") else up_ratios
+        out_channels = cfg.out_channels if cfg is not None and hasattr(cfg, "out_channels") else out_channels
+        use_tanh = cfg.use_tanh if cfg is not None and hasattr(cfg, "use_tanh") else use_tanh
 
         # Create first convolution
         self.block = [WNConv1d(1, d_model, kernel_size=7, padding=3)]
