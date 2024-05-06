@@ -1,0 +1,10 @@
+torch
+numpy==1.23
+librosa==0.8.1
+scipy
+tensorboard
+soundfile
+matplotlib
+pesq
+auraloss
+tqdm

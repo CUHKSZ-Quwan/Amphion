@@ -11,6 +11,7 @@ from models.tts.fastspeech2.fs2_trainer import FastSpeech2Trainer
 from models.tts.vits.vits_trainer import VITSTrainer
 from models.tts.valle.valle_trainer import VALLETrainer
 from models.tts.naturalspeech2.ns2_trainer import NS2Trainer
+from models.tts.gpt_tts.gpt_tts_trainer import NS2Trainer as GPTTTSTrainer
 from utils.util import load_config
 
 
@@ -20,6 +21,7 @@ def build_trainer(args, cfg):
         "VITS": VITSTrainer,
         "VALLE": VALLETrainer,
         "NaturalSpeech2": NS2Trainer,
+        "GPTTTS": GPTTTSTrainer,
     }
 
     trainer_class = supported_trainer[cfg.model_type]
@@ -78,24 +80,24 @@ def main():
     cfg = load_config(args.config)
 
     # Data Augmentation
-    if (
-        type(cfg.preprocess.data_augment) == list
-        and len(cfg.preprocess.data_augment) > 0
-    ):
-        new_datasets_list = []
-        for dataset in cfg.preprocess.data_augment:
-            new_datasets = [
-                f"{dataset}_pitch_shift" if cfg.preprocess.use_pitch_shift else None,
-                (
-                    f"{dataset}_formant_shift"
-                    if cfg.preprocess.use_formant_shift
-                    else None
-                ),
-                f"{dataset}_equalizer" if cfg.preprocess.use_equalizer else None,
-                f"{dataset}_time_stretch" if cfg.preprocess.use_time_stretch else None,
-            ]
-            new_datasets_list.extend(filter(None, new_datasets))
-        cfg.dataset.extend(new_datasets_list)
+    # if (
+    #     type(cfg.preprocess.data_augment) == list
+    #     and len(cfg.preprocess.data_augment) > 0
+    # ):
+    #     new_datasets_list = []
+    #     for dataset in cfg.preprocess.data_augment:
+    #         new_datasets = [
+    #             f"{dataset}_pitch_shift" if cfg.preprocess.use_pitch_shift else None,
+    #             (
+    #                 f"{dataset}_formant_shift"
+    #                 if cfg.preprocess.use_formant_shift
+    #                 else None
+    #             ),
+    #             f"{dataset}_equalizer" if cfg.preprocess.use_equalizer else None,
+    #             f"{dataset}_time_stretch" if cfg.preprocess.use_time_stretch else None,
+    #         ]
+    #         new_datasets_list.extend(filter(None, new_datasets))
+    #     cfg.dataset.extend(new_datasets_list)
 
     # # CUDA settings
     cuda_relevant()

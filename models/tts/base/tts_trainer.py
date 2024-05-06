@@ -294,43 +294,44 @@ class TTSTrainer(BaseTrainer):
     def _build_scheduler(self):
         pass
 
-    def _load_model(self, checkpoint_dir, checkpoint_path=None, resume_type="resume"):
-        """Load model from checkpoint. If a folder is given, it will
-        load the latest checkpoint in checkpoint_dir. If a path is given
-        it will load the checkpoint specified by checkpoint_path.
-        **Only use this method after** ``accelerator.prepare()``.
+    def _load_model(
+        self,
+        checkpoint_dir: str = None,
+        checkpoint_path: str = None,
+        resume_type: str = "",
+    ):
+        r"""Load model from checkpoint. If checkpoint_path is None, it will
+        load the latest checkpoint in checkpoint_dir. If checkpoint_path is not
+        None, it will load the checkpoint specified by checkpoint_path. **Only use this
+        method after** ``accelerator.prepare()``.
         """
-        if checkpoint_path is None or checkpoint_path == "":
-            ls = [str(i) for i in Path(checkpoint_dir).glob("*")]
-            ls.sort(key=lambda x: int(x.split("_")[-3].split("-")[-1]), reverse=True)
+        if checkpoint_path is None:
+            all_ckpts = os.listdir(checkpoint_dir)
+            all_ckpts = filter(lambda x: x.startswith("epoch"), all_ckpts)
+            ls = list(all_ckpts)
+            ls = [os.path.join(checkpoint_dir, i) for i in ls]
+            ls.sort(key=lambda x: int(x.split("_")[-2].split("-")[-1]), reverse=True)
             checkpoint_path = ls[0]
-        self.logger.info("Load model from {}".format(checkpoint_path))
-        print("Load model from {}".format(checkpoint_path))
-        if resume_type == "resume":
-            self.accelerator.load_state(checkpoint_path)
+            print("Resume from {}".format(checkpoint_path))
+
+        if resume_type in ["resume", ""]:
+            # Load all the things, including model weights, optimizer, scheduler, and random states.
+            self.accelerator.load_state(input_dir=checkpoint_path)
+
+            # set epoch and step
             self.epoch = int(checkpoint_path.split("_")[-3].split("-")[-1]) + 1
             self.step = int(checkpoint_path.split("_")[-2].split("-")[-1]) + 1
-        elif resume_type == "finetune":
-            if isinstance(self.model, dict):
-                for idx, sub_model in enumerate(self.model.keys()):
-                    if idx == 0:
-                        ckpt_name = "pytorch_model.bin"
-                    else:
-                        ckpt_name = "pytorch_model_{}.bin".format(idx)
 
-                    self.model[sub_model].load_state_dict(
-                        torch.load(os.path.join(checkpoint_path, ckpt_name))
-                    )
-                self.model[sub_model].cuda(self.accelerator.device)
-            else:
-                self.model.load_state_dict(
-                    torch.load(os.path.join(checkpoint_path, "pytorch_model.bin"))
-                )
-                self.model.cuda(self.accelerator.device)
-            self.logger.info("Load model weights for finetune SUCCESS!")
+        elif resume_type == "finetune":
+            # Load only the model weights
+            accelerate.load_checkpoint_and_dispatch(
+                self.accelerator.unwrap_model(self.model),
+                os.path.join(checkpoint_path, "pytorch_model.bin"),
+            )
+            self.logger.info("Load model weights for finetune...")
 
         else:
-            raise ValueError("Unsupported resume type: {}".format(resume_type))
+            raise ValueError("Resume_type must be `resume` or `finetune`.")
 
         return checkpoint_path
 

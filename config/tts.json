@@ -4,7 +4,8 @@
     "Fastspeech2",
     "VITS",
     "VALLE",
-    "NaturalSpeech2"
+    "NaturalSpeech2",
+    "GPTTTS",
   ],
   "task_type": "tts",
   "preprocess": {

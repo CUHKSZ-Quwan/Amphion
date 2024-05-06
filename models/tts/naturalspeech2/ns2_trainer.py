@@ -9,6 +9,7 @@ import json
 import time
 import torch
 import numpy as np
+import pyworld as pw
 from utils.util import Logger, ValueWindow
 from torch.utils.data import ConcatDataset, DataLoader
 from models.tts.base.tts_trainer import TTSTrainer
@@ -21,6 +22,7 @@ from models.tts.naturalspeech2.ns2_loss import (
     diff_loss,
     diff_ce_loss,
 )
+from models.codec.amphion_codec.codec import CodecEncoder, CodecDecoder
 from torch.utils.data.sampler import BatchSampler, SequentialSampler
 from models.tts.naturalspeech2.ns2 import NaturalSpeech2
 from torch.optim import Adam, AdamW
@@ -134,6 +136,8 @@ class NS2Trainer(TTSTrainer):
                 self.logger.info(
                     f"Model parameters: {self._count_parameters(self.model)/1e6:.2f}M"
                 )
+
+        self.codec_enc, self.codec_dec = self._build_codec()
 
         # optimizer & scheduler
         with self.accelerator.main_process_first():
@@ -255,6 +259,25 @@ class NS2Trainer(TTSTrainer):
     def _build_model(self):
         model = NaturalSpeech2(cfg=self.cfg.model)
         return model
+
+    def _build_codec(self):
+        codec_enc = CodecEncoder(cfg=self.cfg.model.codec.encoder)
+        codec_dec = CodecDecoder(cfg=self.cfg.model.codec.decoder)
+
+        codec_enc.load_state_dict(
+            torch.load(self.cfg.model.codec.encoder.pretrained_ckpt)
+        )
+        codec_dec.load_state_dict(
+            torch.load(self.cfg.model.codec.decoder.pretrained_ckpt)
+        )
+
+        codec_enc.eval()
+        codec_dec.eval()
+
+        codec_enc.requires_grad_(False)
+        codec_dec.requires_grad_(False)
+
+        return codec_enc, codec_dec
 
     def _build_dataset(self):
         return NS2Dataset, NS2Collator
@@ -403,24 +426,46 @@ class NS2Trainer(TTSTrainer):
         total_loss = 0
         train_stats = {}
 
-        code = batch["code"]  # (B, 16, T)
-        pitch = batch["pitch"]  # (B, T)
-        duration = batch["duration"]  # (B, N)
-        phone_id = batch["phone_id"]  # (B, N)
-        ref_code = batch["ref_code"]  # (B, 16, T')
-        phone_mask = batch["phone_mask"]  # (B, N)
-        mask = batch["mask"]  # (B, T)
-        ref_mask = batch["ref_mask"]  # (B, T')
+        with torch.no_grad():
+
+            speech = batch["speech"]
+            ref_speech = batch["ref_speech"]
+
+            latent = self.codec_enc(speech.unsqueeze(1))
+            ref_latent = self.codec_enc(ref_speech.unsqueeze(1))
+
+            _, gt_indices = self.codec_dec.quantize(latent)
+
+            latent = latent.transpose(1, 2)  # (B, T, 256)
+            ref_latent = ref_latent.transpose(1, 2)  # (B, T', 256)
+
+            del speech
+            del ref_speech
+
+        # print(mel.shape, ref_mel.shape)
+        batch["pitch"] = self.extract_world_f0(batch["speech"])
+        pitch = batch["pitch"]
+        # print(pitch.shape)
+        duration = batch["duration"]
+        # print(duration.shape)
+        phone_id = batch["phone_id"]
+        # print(phone_id.shape)
+        phone_id_mask = batch["phone_id_mask"]
+        # print(phone_id_mask.shape)
+        mask = batch["mask"]
+        # print(mask.shape)
+        ref_mask = batch["ref_mask"]
+        # print(ref_mask.shape)
 
         diff_out, prior_out = self.model(
-            code=code,
+            x=latent,
             pitch=pitch,
             duration=duration,
             phone_id=phone_id,
-            ref_code=ref_code,
-            phone_mask=phone_mask,
-            mask=mask,
-            ref_mask=ref_mask,
+            x_ref=ref_latent,
+            phone_mask=phone_id_mask,
+            x_mask=mask,
+            x_ref_mask=ref_mask,
         )
 
         # pitch loss
@@ -429,39 +474,30 @@ class NS2Trainer(TTSTrainer):
         train_losses["pitch_loss"] = pitch_loss
 
         # duration loss
-        dur_loss = log_dur_loss(prior_out["dur_pred_log"], duration, mask=phone_mask)
+        dur_loss = log_dur_loss(prior_out["dur_pred_log"], duration, mask=phone_id_mask)
         total_loss += dur_loss
         train_losses["dur_loss"] = dur_loss
 
-        x0 = self.model.module.code_to_latent(code)
-        if self.cfg.model.diffusion.diffusion_type == "diffusion":
-            # diff loss x0
-            diff_loss_x0 = diff_loss(diff_out["x0_pred"], x0, mask=mask)
-            total_loss += diff_loss_x0
-            train_losses["diff_loss_x0"] = diff_loss_x0
+        # diff loss x0
+        diff_loss_x0 = diff_loss(diff_out["x0_pred"], latent, mask=mask)
+        total_loss += diff_loss_x0
+        train_losses["diff_loss_x0"] = diff_loss_x0
 
-            # diff loss noise
-            diff_loss_noise = diff_loss(
-                diff_out["noise_pred"], diff_out["noise"], mask=mask
-            )
-            total_loss += diff_loss_noise * self.cfg.train.diff_noise_loss_lambda
-            train_losses["diff_loss_noise"] = diff_loss_noise
-
-        elif self.cfg.model.diffusion.diffusion_type == "flow":
-            # diff flow matching loss
-            flow_gt = diff_out["noise"] - x0
-            diff_loss_flow = diff_loss(diff_out["flow_pred"], flow_gt, mask=mask)
-            total_loss += diff_loss_flow
-            train_losses["diff_loss_flow"] = diff_loss_flow
+        # diff loss noise
+        diff_loss_noise = diff_loss(
+            diff_out["noise_pred"], diff_out["noise"], mask=mask
+        )
+        total_loss += diff_loss_noise * self.cfg.train.diff_noise_loss_lambda
+        train_losses["diff_loss_noise"] = diff_loss_noise
 
         # diff loss ce
 
         # (nq, B, T); (nq, B, T, 1024)
         if self.cfg.train.diff_ce_loss_lambda > 0:
-            pred_indices, pred_dist = self.model.module.latent_to_code(
-                diff_out["x0_pred"], nq=code.shape[1]
-            )
-            gt_indices, _ = self.model.module.latent_to_code(x0, nq=code.shape[1])
+            pred_dist, pred_indices = self.codec_dec.latent2dist(
+                diff_out["x0_pred"].transpose(1, 2)
+            )  # (nq, B, T, 1024)
+            # print(pred_dist.shape)
             diff_loss_ce = diff_ce_loss(pred_dist, gt_indices, mask=mask)
             total_loss += diff_loss_ce * self.cfg.train.diff_ce_loss_lambda
             train_losses["diff_loss_ce"] = diff_loss_ce
@@ -490,7 +526,7 @@ class NS2Trainer(TTSTrainer):
                 ) / np.sum(mask_list)
                 train_losses["pred_acc_{}".format(str(i))] = pred_acc
 
-        train_losses["batch_size"] = code.shape[0]
+        train_losses["batch_size"] = latent.shape[0]
         train_losses["max_frame_nums"] = np.max(
             batch["frame_nums"].detach().cpu().numpy()
         )
@@ -796,3 +832,27 @@ class NS2Trainer(TTSTrainer):
                 )
             )
         self.accelerator.end_training()
+
+    def interpolate(self, f0):
+        uv = f0 == 0
+        if len(f0[~uv]) > 0:
+            # interpolate the unvoiced f0
+            f0[uv] = np.interp(np.where(uv)[0], np.where(~uv)[0], f0[~uv])
+            uv = uv.astype("float")
+            uv = np.min(np.array([uv[:-2], uv[1:-1], uv[2:]]), axis=0)
+            uv = np.pad(uv, (1, 1))
+        return f0, uv
+
+    def extract_world_f0(self, speech):
+        audio = speech.cpu().numpy()
+        f0s = []
+        for i in range(audio.shape[0]):
+            wav = audio[i]
+            frame_num = len(wav) // 200
+            f0, t = pw.dio(wav.astype(np.float64), 16000, frame_period=12.5)
+            f0 = pw.stonemask(wav.astype(np.float64), f0, t, 16000)
+            f0, _ = self.interpolate(f0)
+            f0 = torch.from_numpy(f0).to(speech.device)
+            f0s.append(f0[:frame_num])
+        f0s = torch.stack(f0s, dim=0).float()
+        return f0s

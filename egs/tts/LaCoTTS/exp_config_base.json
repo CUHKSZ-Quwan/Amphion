@@ -1,0 +1,116 @@
+{
+    // "base_config": "config/tts.json",
+    "model_type": "GPTTTS",
+    "dataset": ["Your Dataset Name"],
+    "preprocess": {
+        "hop_size": 200,
+        "sample_rate": 16000,
+        "processed_dir": "",
+        "valid_file": "valid.json",
+        "train_file": "train.json"
+    },
+    "model": {
+        "latent_codec": {
+            "encoder": {
+                "d_mel": 128,
+                "d_model": 96,
+                "num_blocks": 4,
+                "out_channels": 256,
+                "use_tanh": false,
+                "pretrained_ckpt": "ckpts/latent_codec/latent_codec_enc.bin"
+            },
+            "decoder": {
+                "in_channels": 256,
+                "num_quantizers": 1,
+                "codebook_size": 8192,
+                "codebook_dim": 8,
+                "quantizer_type": "fvq",
+                "use_l2_normlize": true,
+                "vocos_dim": 512,
+                "vocos_intermediate_dim": 4096,
+                "vocos_num_layers": 16,
+                "ln_before_vq": true,
+                "use_pe": false,
+                "pretrained_ckpt": "ckpts/latent_codec/latent_codec_dec.bin"
+            }     
+        },
+        "wav_codec": {
+            "encoder": {
+                "d_model": 96,
+                "out_channels": 128,
+                "up_ratios": [2, 4, 5, 5],
+                "use_tanh": false,
+                "pretrained_ckpt": "ckpts/wav_codec/wav_codec_enc.bin"
+            },
+            "decoder": {
+                "in_channels": 128,
+                "upsample_initial_channel": 1536,
+                "num_quantizers": 8,
+                "codebook_size": 1024,
+                "codebook_dim": 128,
+                "quantizer_type": "fvq",
+                "quantizer_dropout": 0.5,
+                "use_l2_normlize": true,
+                "use_vocos": true,
+                "vocos_dim": 512,
+                "vocos_intermediate_dim": 4096,
+                "vocos_num_layers": 24,
+                "pretrained_ckpt": "ckpts/wav_codec/wav_codec_dec.bin"
+            }
+        },
+        "gpt_tts": {
+            "phone_vocab_size": 644,
+            "target_vocab_size": 8192,
+            "hidden_size": 1024,
+            "intermediate_siz": 4096,
+            "num_hidden_layer": 12,
+            "num_attention_head": 16,
+            "pad_token_id": 8838,
+            "bos_target_id": 8839,
+            "eos_target_id": 8840,
+            "bos_phone_id": 8841,
+            "eos_phone_id": 8842,
+            "max_position_embeddings": 2048
+        }
+    },
+    "log_dir": "exps",
+    "train": {
+        "max_epoch": 0,
+        "use_dynamic_batchsize": true,
+        "max_tokens": 1600000,   // 1600000 = 16000 * 100 which means we use at most 100s speech for a batch
+        "max_sentences": 16,
+        "lr_warmup_steps": 32000,
+        "lr_scheduler": "inverse_sqrt",
+        "num_train_steps": 800000,
+        "adam": {
+            "lr": 1e-4
+        },
+        "ddp": false,
+        "random_seed": 114,
+        "batch_size": 10,
+        "epochs": 5000,
+        "max_steps": 1000000,
+        "total_training_steps": 800000,
+        "save_summary_steps": 500,
+        "save_checkpoints_steps": 1000,
+        "valid_interval": 2000,
+        "keep_checkpoint_max": 100,
+        "gradient_accumulation_step": 1,
+        "tracker": ["tensorboard"],
+        "save_checkpoint_stride": [1],
+        "keep_last": [1],
+        "run_eval": [true],
+        "dataloader": {
+          "num_worker": 0,
+          "pin_memory": false
+        }
+    },
+    "trans_exp": {
+        "dataset_list":["mls_train"],
+        "cache_dir": "/mnt/petrelfs/hehaorui/data/exp_cache/vc/",
+        "use_speaker": false,
+        "use_noise": false,
+        "noise_dir": "/mnt/petrelfs/hehaorui/data/noise/audiocaps",
+        "content_model_path": "/mnt/petrelfs/hehaorui/data/pretrained_ckpts/mhubert"
+    }
+}
