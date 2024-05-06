@@ -10,6 +10,21 @@ import torch.nn.functional as F
 import math
 
 
+class SinusoidalPosEmb(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x):
+        device = x.device
+        half_dim = self.dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = x[:, None] * emb[None, :]
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
+
+
 class FiLM(nn.Module):
     def __init__(self, in_dim, cond_dim):
         super().__init__()
@@ -40,7 +55,7 @@ class Mish(nn.Module):
 
 def Conv1d(*args, **kwargs):
     layer = nn.Conv1d(*args, **kwargs)
-    nn.init.kaiming_normal_(layer.weight)
+    layer.weight.data.normal_(0.0, 0.02)
     return layer
 
 
@@ -48,21 +63,6 @@ def Linear(*args, **kwargs):
     layer = nn.Linear(*args, **kwargs)
     layer.weight.data.normal_(0.0, 0.02)
     return layer
-
-
-class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, x):
-        device = x.device
-        half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x[:, None] * emb[None, :]
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb
 
 
 class ResidualBlock(nn.Module):
@@ -127,8 +127,11 @@ class ResidualBlock(nn.Module):
         return (x + residual) / math.sqrt(2.0), skip
 
 
-class WaveNet(nn.Module):
-    def __init__(self, cfg):
+class DiffWaveNet(nn.Module):
+    def __init__(
+        self,
+        cfg=None,
+    ):
         super().__init__()
 
         self.cfg = cfg
@@ -170,14 +173,20 @@ class WaveNet(nn.Module):
 
         nn.init.zeros_(self.out_proj.weight)
 
-    def forward(self, x, x_mask, cond, diffusion_step, spk_query_emb):
-        """
-        x: (B, 128, T)
-        x_mask: (B, T), mask is 0
-        cond: (B, T, 512)
-        diffusion_step: (B,)
-        spk_query_emb: (B, 32, 512)
-        """
+    def forward(
+        self,
+        x,
+        condition_embedding,
+        key_padding_mask=None,
+        reference_embedding=None,
+        diffusion_step=None,
+    ):
+        x = x.transpose(1, 2)  # (B, T, d) -> (B, d, T)
+        x_mask = key_padding_mask
+        cond = condition_embedding
+        spk_query_emb = reference_embedding
+        diffusion_step = diffusion_step
+
         cond = self.cond_ln(cond)
         cond_input = cond.transpose(1, 2)
 
@@ -202,5 +211,7 @@ class WaveNet(nn.Module):
         x_out = F.relu(x_out)
 
         x_out = self.out_proj(x_out)  # (B, 128, T)
+
+        x_out = x_out.transpose(1, 2)
 
         return x_out

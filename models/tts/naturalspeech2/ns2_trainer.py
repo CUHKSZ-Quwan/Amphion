@@ -21,6 +21,7 @@ from models.tts.naturalspeech2.ns2_loss import (
     diff_loss,
     diff_ce_loss,
 )
+from models.codec.amphion_codec.codec import CodecEncoder, CodecDecoder
 from torch.utils.data.sampler import BatchSampler, SequentialSampler
 from models.tts.naturalspeech2.ns2 import NaturalSpeech2
 from torch.optim import Adam, AdamW
@@ -134,6 +135,8 @@ class NS2Trainer(TTSTrainer):
                 self.logger.info(
                     f"Model parameters: {self._count_parameters(self.model)/1e6:.2f}M"
                 )
+
+        self.codec_enc, self.codec_dec = self._build_codec()
 
         # optimizer & scheduler
         with self.accelerator.main_process_first():
@@ -255,6 +258,25 @@ class NS2Trainer(TTSTrainer):
     def _build_model(self):
         model = NaturalSpeech2(cfg=self.cfg.model)
         return model
+
+    def _build_codec(self):
+        codec_enc = CodecEncoder(cfg=self.cfg.model.codec.encoder)
+        codec_dec = CodecDecoder(cfg=self.cfg.model.codec.decoder)
+
+        codec_enc.load_state_dict(
+            torch.load(self.cfg.model.codec.encoder.pretrained_ckpt)
+        )
+        codec_dec.load_state_dict(
+            torch.load(self.cfg.model.codec.decoder.pretrained_ckpt)
+        )
+
+        codec_enc.eval()
+        codec_dec.eval()
+
+        codec_enc.requires_grad_(False)
+        codec_dec.requires_grad_(False)
+
+        return codec_enc, codec_dec
 
     def _build_dataset(self):
         return NS2Dataset, NS2Collator
